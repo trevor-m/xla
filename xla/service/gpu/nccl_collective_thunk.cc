@@ -157,7 +157,7 @@ NcclCollectiveThunk::NcclCollectiveThunk(Kind kind, ThunkInfo thunk_info,
 StatusOr<NcclComm::Lock> LockNcclComm(
     const NcclExecuteParams& params,
     const std::vector<ReplicaGroup>& replica_groups,
-    CollectiveOpGroupMode group_mode, int64_t op_id, int64_t stream_id) {
+    CollectiveOpGroupMode group_mode, int64_t op_id) {
   TF_ASSIGN_OR_RETURN(GlobalDeviceId global_device_id,
                       params.GetGlobalDeviceId());
 
@@ -195,8 +195,7 @@ StatusOr<NcclComm::Lock> LockNcclComm(
   se::gpu::ScopedActivateExecutorContext scoped_context(params.stream_executor);
 
   return AcquireNcclComm(params.run_id, OpId(op_id), std::move(participants),
-                         num_local_participants, *unique_id_callback, rank,
-                         stream_id);
+                         num_local_participants, *unique_id_callback, rank);
 }
 #endif  // XLA_ENABLE_XCCL
 
@@ -222,27 +221,12 @@ StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
 
 Status NcclCollectiveThunk::ExecuteOnStream(const ExecuteParams& params) {
 #if XLA_ENABLE_XCCL
-  VLOG(1) << absl::StreamFormat("Starting %s %s.", IsAsync() ? "async" : "sync",
-                                Thunk::KindToString(kind()));
-  const int64_t stream_id = IsAsync() ? 1 : 0;
-  TF_ASSIGN_OR_RETURN(
-      NcclComm::Lock comm,
-      LockNcclComm(params.nccl_params, config().replica_groups,
-                   config().group_mode, config().op_id, stream_id));
+  VLOG(1) << absl::StreamFormat("Starting %s.", Thunk::KindToString(kind()));
+  TF_ASSIGN_OR_RETURN(NcclComm::Lock comm,
+                      LockNcclComm(params.nccl_params, config().replica_groups,
+                                   config().group_mode, config().op_id));
 
-  // Run the collective on main stream or using the async executor.
-  Status status = [&]() {
-    if (!IsAsync()) {
-      return RunNcclCollective(params, *params.stream, *comm);
-    }
-    return async_->Execute(
-        [this](const ExecuteParams& params, se::Stream& stream,
-               ncclComm_t comm) {
-          return RunNcclCollective(params, stream, comm);
-        },
-        params, *comm);
-  }();
-  TF_RETURN_IF_ERROR(status);
+  TF_RETURN_IF_ERROR(RunNcclCollective(params, *params.stream, *comm));
 
   // Block host on the first call to ensure that all devices have allocated the
   // required buffers for their communicators before allowing any device to
