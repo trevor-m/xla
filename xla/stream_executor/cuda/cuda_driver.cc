@@ -41,6 +41,7 @@ limitations under the License.
 #include "third_party/gpus/cuda/include/cuda.h"
 #include "third_party/gpus/cuda/include/cuda_runtime_api.h"
 #include "third_party/gpus/cuda/include/driver_types.h"
+#include "third_party/nccl/nccl.h"
 #include "xla/stream_executor/device_options.h"
 #include "xla/stream_executor/gpu/gpu_diagnostics.h"
 #include "xla/stream_executor/gpu/gpu_driver.h"
@@ -55,6 +56,7 @@ limitations under the License.
 #include "tsl/platform/status.h"
 #include "tsl/platform/statusor.h"
 #include "tsl/platform/threadpool.h"
+#include "tsl/util/env_var.h"
 
 static constexpr bool FLAGS_gpuexec_cuda_driver_inject_init_error = false;
 static constexpr bool FLAGS_gpuexec_cuda_sync_around_driver_calls = false;
@@ -1224,18 +1226,30 @@ GpuDriver::GraphAddNode(CUgraphNode* node, CUgraph graph,
 
   ScopedActivateContext activated{context};
   CUdeviceptr result = 0;
-  CUresult res = cuMemAlloc(&result, bytes);
-  if (res != CUDA_SUCCESS) {
-    // LOG(INFO) because this isn't always important to users (e.g. BFCAllocator
-    // implements a retry if the first allocation fails).
-    LOG(INFO) << "failed to allocate "
-              << tsl::strings::HumanReadableNumBytes(bytes) << " (" << bytes
-              << " bytes) from device: " << ToString(res);
-    return nullptr;
+  bool use_ncclmemalloc = false;
+  TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_USE_NCCLMEMALLOC", /*default_val=*/false, &use_ncclmemalloc));
+  if (use_ncclmemalloc) {
+    ncclResult_t res = ncclMemAlloc((void**)&result, bytes);
+    if (res != ncclSuccess) {
+      LOG(INFO) << "failed to allocate "
+                << tsl::strings::HumanReadableNumBytes(bytes) << " (" << bytes
+                << " bytes) from device: " << ncclGetErrorString(res);
+      return nullptr;
+    }
+  } else {
+    CUresult res = cuMemAlloc(&result, bytes);
+    if (res != CUDA_SUCCESS) {
+      // LOG(INFO) because this isn't always important to users (e.g. BFCAllocator
+      // implements a retry if the first allocation fails).
+      LOG(INFO) << "failed to allocate "
+                << tsl::strings::HumanReadableNumBytes(bytes) << " (" << bytes
+                << " bytes) from device: " << ToString(res);
+      return nullptr;
+    }
   }
   void* ptr = reinterpret_cast<void*>(result);
   VLOG(2) << "allocated " << ptr << " for context " << context->context()
-          << " of " << bytes << " bytes";
+          << " of " << bytes << " bytes" << (use_ncclmemalloc ? " using ncclMemAlloc" : "");
   return ptr;
 }
 
@@ -1243,13 +1257,26 @@ GpuDriver::GraphAddNode(CUgraphNode* node, CUgraph graph,
                                               void* location) {
   ScopedActivateContext activation(context);
   CUdeviceptr pointer = absl::bit_cast<CUdeviceptr>(location);
-  CUresult res = cuMemFree(pointer);
-  if (res != CUDA_SUCCESS) {
-    LOG(ERROR) << "failed to free device memory at " << location
-               << "; result: " << ToString(res);
+  bool use_ncclmemalloc = false;
+  TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_USE_NCCLMEMALLOC", /*default_val=*/false, &use_ncclmemalloc));
+  if (use_ncclmemalloc) {
+    ncclResult_t res = ncclMemFree((void*)pointer);
+    if (res != ncclSuccess) {
+      LOG(ERROR) << "failed to free device memory at " << location
+                 << "; result: " << ncclGetErrorString(res);
+    } else {
+      VLOG(2) << "deallocated " << location << " for context "
+              << context->context() << " using ncclMemAlloc";
+    }
   } else {
-    VLOG(2) << "deallocated " << location << " for context "
-            << context->context();
+    CUresult res = cuMemFree(pointer);
+    if (res != CUDA_SUCCESS) {
+      LOG(ERROR) << "failed to free device memory at " << location
+                 << "; result: " << ToString(res);
+    } else {
+      VLOG(2) << "deallocated " << location << " for context "
+              << context->context();
+    }
   }
 }
 
