@@ -11,6 +11,7 @@ ncclCommGetAsyncError
 ncclCommInitAll
 ncclCommInitRank
 ncclCommInitRankConfig
+ncclCommRegister
 ncclCommSplit
 ncclCommUserRank
 ncclGetErrorString
@@ -19,6 +20,7 @@ ncclGetUniqueId
 ncclGetVersion
 ncclGroupEnd
 ncclGroupStart
+ncclMemAlloc
 ncclRecv
 ncclRedOpCreatePreMulSum
 ncclRedOpDestroy
@@ -38,6 +40,7 @@ pncclCommGetAsyncError
 pncclCommInitAll
 pncclCommInitRank
 pncclCommInitRankConfig
+pncclCommRegister
 pncclCommSplit
 pncclCommUserRank
 pncclGetErrorString
@@ -46,6 +49,7 @@ pncclGetUniqueId
 pncclGetVersion
 pncclGroupEnd
 pncclGroupStart
+pncclMemAlloc
 pncclRecv
 pncclRedOpCreatePreMulSum
 pncclRedOpDestroy
