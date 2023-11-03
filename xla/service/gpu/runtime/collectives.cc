@@ -23,6 +23,7 @@ limitations under the License.
 #include <vector>
 
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/log.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
@@ -43,6 +44,7 @@ limitations under the License.
 #include "xla/service/service_executable_run_options.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/stream.h"
+#include "tsl/util/env_var.h"
 
 #if XLA_ENABLE_XCCL
 #if GOOGLE_CUDA
@@ -126,32 +128,89 @@ StatusOr<NcclComm::Lock> GetNcclComm(
                       stream_id, enable_clique_optimization);
 }
 
-StatusOr<std::vector<DeviceBufferPair>> AcquireNcclBuffers(ncclComm_t comm, const std::vector<DeviceBufferPair>& device_buffers) {
+
+// Get per-device nccl user buffer size in bytes. Returns 512 if
+// TF_NCCL_USER_BUFFER_SIZE_MB environment variable is not set.
+ int64_t GetNcclUserBufferSizeBytes() {
+  int64_t value;
+  TF_CHECK_OK(
+      tsl::ReadInt64FromEnvVar("TF_NCCL_USER_BUFFER_SIZE_MB", 512, &value));
+  return value * (1ll << 20);
+}
+
+bool UseNcclUserBuffers() {
+  bool enable_nccl_user_buffers;
+  TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_ENABLE_NCCL_USER_BUFFER",
+                                      /*default_val=*/true, &enable_nccl_user_buffers));
+  return enable_nccl_user_buffers;
+}
+
+bool UseNcclUserBufferMemcpy() {
+  bool use_memcpy;
+  TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_NCCL_USER_BUFFER_USE_MEMCPY",
+                                      /*default_val=*/true, &use_memcpy));
+  return use_memcpy;
+}
+
+StatusOr<std::vector<DeviceBufferPair>> AcquireNcclBuffers(se::Stream* stream, ncclComm_t comm, const std::vector<DeviceBufferPair>& device_buffers) {
+  if (!UseNcclUserBuffers())
+    return device_buffers;
+
+  struct NcclBuffer {
+    char* data;
+    std::vector<void*> handles;
+    size_t size;
+    absl::flat_hash_set<ncclComm_t> registered_comms;
+  };
   struct AllBuffers {
     absl::Mutex mu;
-    absl::flat_hash_map<ncclComm_t, std::vector<DeviceBufferPair>> buffers ABSL_GUARDED_BY(mu);
+    // Map of device_ordinal to NcclBuffer.
+    absl::flat_hash_map<int32_t, NcclBuffer> buffers ABSL_GUARDED_BY(mu);
   };
   static auto& all_buffers = *new AllBuffers;
-  
-  absl::MutexLock lock(&all_buffers.mu);
-  if (!all_buffers.buffers.count(comm)) {
-    std::vector<DeviceBufferPair> nccl_buffers;
-    for (int i = 0; i < device_buffers.size(); ++i) {
-      size_t buffer_size = device_buffers[i].source_buffer.size() +
-                          device_buffers[i].destination_buffer.size();
-      VLOG(1) << "ncclMemAlloc size=" << buffer_size << " for comm=" << comm;
-      char* nccl_buffer;
-      void* nccl_handle;
-      XLA_CUDA_RETURN_IF_ERROR(ncclMemAlloc((void**)&nccl_buffer, buffer_size));
-      XLA_CUDA_RETURN_IF_ERROR(ncclCommRegister(comm, (void*)nccl_buffer, buffer_size, &nccl_handle));
-      nccl_buffers.emplace_back(DeviceBufferPair{
-          device_buffers[i].element_type, device_buffers[i].element_count,
-          se::DeviceMemoryBase(nccl_buffer, device_buffers[i].source_buffer.size()),
-          se::DeviceMemoryBase(nccl_buffer + device_buffers[i].source_buffer.size(), device_buffers[i].destination_buffer.size())});
+
+  std::vector<DeviceBufferPair> nccl_buffers;
+  {
+    absl::MutexLock lock(&all_buffers.mu);
+    // Allocate buffer for this device if not already allocated.
+    int32_t device_ordinal = stream->parent()->device_ordinal();
+    if (!all_buffers.buffers.count(device_ordinal)) {
+      NcclBuffer new_buffer;
+      new_buffer.size = GetNcclUserBufferSizeBytes();
+      VLOG(1) << "ncclMemAlloc size=" << new_buffer.size << " for device=" << device_ordinal;
+      XLA_CUDA_RETURN_IF_ERROR(ncclMemAlloc((void**)&new_buffer.data, new_buffer.size));
+      all_buffers.buffers[device_ordinal] = new_buffer;
     }
-    all_buffers.buffers[comm] = nccl_buffers;
+    NcclBuffer& buffer = all_buffers.buffers[device_ordinal];
+
+    // Register comm if not already registered
+    if (!buffer.registered_comms.contains(comm)) {
+      VLOG(1) << "ncclCommRegister comm=" << comm << " for device=" << device_ordinal;
+      void* handle;
+      XLA_CUDA_RETURN_IF_ERROR(ncclCommRegister(comm, (void*)buffer.data, buffer.size, &handle));
+      buffer.handles.push_back(handle);
+      buffer.registered_comms.insert(comm);
+    }
+    // Use slices of ncclMemAlloc buffer to create all source/dest buffers.
+    char* data = buffer.data;
+    size_t total_size = 0;
+    for (int i = 0; i < device_buffers.size(); ++i) {
+        nccl_buffers.emplace_back(DeviceBufferPair{
+            device_buffers[i].element_type, device_buffers[i].element_count,
+            se::DeviceMemoryBase(data, device_buffers[i].source_buffer.size()),
+            se::DeviceMemoryBase(data + device_buffers[i].source_buffer.size(), device_buffers[i].destination_buffer.size())});
+        data += device_buffers[i].source_buffer.size() + device_buffers[i].destination_buffer.size();
+        total_size += device_buffers[i].source_buffer.size() + device_buffers[i].destination_buffer.size();
+        CHECK_LE(total_size, buffer.size);
+    }
   }
-  return all_buffers.buffers[comm];
+  // Copy input to nccl user buffers
+  if (UseNcclUserBufferMemcpy()) {
+    for (int i = 0; i < device_buffers.size(); ++i) {
+        stream->ThenMemcpy(&nccl_buffers[i].source_buffer, device_buffers[i].source_buffer, device_buffers[i].source_buffer.size());
+    }
+  }
+  return nccl_buffers;
 }
 #endif  // XLA_ENABLE_XCCL
 
@@ -482,10 +541,19 @@ absl::Status AllGatherImplCommon(
                   debug_options->xla_gpu_enable_nccl_clique_optimization()));
 
   TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
+  TF_ASSIGN_OR_RETURN(auto nccl_buffers, AcquireNcclBuffers(stream, *comm, device_buffers));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(),
-      [&]() { return RunAllGather(device_buffers, *stream, *comm); });
+      [&]() {
+        Status status = RunAllGather(nccl_buffers, *stream, *comm);
+        if (UseNcclUserBufferMemcpy()) {
+          for (size_t i = 0; i < device_buffers.size(); ++i) {
+            stream->ThenMemcpy(&device_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer.size());
+          }
+        }
+        return status;
+      });
 }
 #endif  // XLA_ENABLE_XCCL
 
@@ -551,20 +619,16 @@ absl::Status AllReduceImplCommon(
                   debug_options->xla_gpu_enable_nccl_clique_optimization()));
 
   TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
-
-  // NCCL User buffers
-  std::vector<DeviceBufferPair> nccl_buffers = AcquireNcclBuffers(*comm, device_buffers);
-  for (int i = 0; i < device_buffers.size(); ++i) {
-      stream->ThenMemcpy(&nccl_buffers[i].source_buffer, device_buffers[i].source_buffer, device_buffers[i].source_buffer.size());
-  }
+  TF_ASSIGN_OR_RETURN(auto nccl_buffers, AcquireNcclBuffers(stream, *comm, device_buffers));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(), [&]() {
         Status status = RunAllReduce(static_cast<ReductionKind>(reduction_kind),
                                      nccl_buffers, *stream, *comm);
-
-        for (size_t i = 0; i < device_buffers.size(); ++i) {
-          stream->ThenMemcpy(&device_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer.size());
+        if (UseNcclUserBufferMemcpy()) {
+          for (size_t i = 0; i < device_buffers.size(); ++i) {
+            stream->ThenMemcpy(&device_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer.size());
+          }
         }
         return status;
       });
@@ -713,11 +777,18 @@ absl::Status ReduceScatterImplCommon(
                   debug_options->xla_gpu_enable_nccl_clique_optimization()));
 
   TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
+  TF_ASSIGN_OR_RETURN(auto nccl_buffers, AcquireNcclBuffers(stream, *comm, device_buffers));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(), [&]() {
-        return RunReduceScatter(static_cast<ReductionKind>(reduction_kind),
-                                device_buffers, *stream, *comm);
+        Status status = RunReduceScatter(static_cast<ReductionKind>(reduction_kind),
+                                         nccl_buffers, *stream, *comm);
+        if (UseNcclUserBufferMemcpy()) {
+          for (size_t i = 0; i < device_buffers.size(); ++i) {
+            stream->ThenMemcpy(&device_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer, nccl_buffers[i].destination_buffer.size());
+          }
+        }
+        return status;
       });
 }
 #endif  // XLA_ENABLE_XCCL
