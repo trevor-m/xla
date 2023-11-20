@@ -44,6 +44,7 @@ limitations under the License.
 #include "xla/service/service_executable_run_options.h"
 #include "xla/stream_executor/kernel.h"
 #include "xla/stream_executor/stream.h"
+#include "tsl/util/env_var.h"
 
 #if XLA_ENABLE_XCCL
 #include "xla/service/gpu/runtime/gpu_kernel_helper.h"
@@ -132,6 +133,41 @@ StatusOr<NcclComm::Lock> GetNcclComm(
   return LockNcclComm(params, replica_groups,
                       static_cast<CollectiveOpGroupMode>(group_mode), op_id,
                       stream_id, enable_clique_optimization);
+}
+
+absl::Status RegisterBuffers(const std::vector<DeviceBufferPair>& device_buffers, ncclComm_t comm) {
+  bool use_ncclmemalloc = false;
+  TF_CHECK_OK(tsl::ReadBoolFromEnvVar("TF_USE_NCCLMEMALLOC", /*default_val=*/false, &use_ncclmemalloc));
+  if (!use_ncclmemalloc) return OkStatus();
+
+  struct AllBuffers {
+    absl::Mutex mu;
+    // Map of device_ordinal to NcclBuffer.
+    absl::flat_hash_map<void*, absl::flat_hash_set<ncclComm_t>> registered ABSL_GUARDED_BY(mu);
+    std::vector<void*> handles ABSL_GUARDED_BY(mu);
+  };
+  static auto& all_buffers = *new AllBuffers;
+
+  auto maybe_register = [&](void* data, size_t size) {
+    if (!all_buffers.registered.count(data)) {
+      all_buffers.registered[data] = {};
+    }
+    if (!all_buffers.registered[data].count(comm)) {
+      void* handle;
+      VLOG(1) << "ncclCommRegister comm=" << comm << " buff= " << data << " size= " << size;
+      XLA_CUDA_RETURN_IF_ERROR(ncclCommRegister(comm, data, size, &handle));
+      all_buffers.registered[data].insert(comm);
+      all_buffers.handles.push_back(handle);
+    }
+    return OkStatus();
+  };
+
+  absl::MutexLock lock(&all_buffers.mu);
+  for (int i = 0; i < device_buffers.size(); ++i) {
+    TF_RETURN_IF_ERROR(maybe_register((void*)device_buffers[i].source_buffer.opaque(), device_buffers[i].source_buffer.size()));
+    TF_RETURN_IF_ERROR(maybe_register((void*)device_buffers[i].destination_buffer.opaque(), device_buffers[i].destination_buffer.size()));
+  }
+  return OkStatus();
 }
 #endif  // XLA_ENABLE_XCCL
 
@@ -472,6 +508,7 @@ absl::Status AllGatherImplCommon(
                              enable_clique_opt));
 
   TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
+  TF_RETURN_IF_ERROR(RegisterBuffers(device_buffers, *comm));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(),
@@ -547,6 +584,7 @@ absl::Status AllReduceImplCommon(
                              enable_clique_opt));
 
   TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
+  TF_RETURN_IF_ERROR(RegisterBuffers(device_buffers, *comm));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(), [&]() {
@@ -627,7 +665,8 @@ absl::Status AllToAllImplCommon(const ServiceExecutableRunOptions* run_options,
                              replica_group_values, GetStreamId(is_async),
                              enable_clique_opt));
 
-  TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));
+  TF_ASSIGN_OR_RETURN(auto device_buffers, GetDeviceBufferPairs(args));  
+  TF_RETURN_IF_ERROR(RegisterBuffers(device_buffers, *comm));
 
   return RunRepeated(
       debug_options->xla_gpu_collective_inflation_factor(), [&]() {
