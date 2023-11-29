@@ -536,9 +536,12 @@ StreamExecutorGpuClient::Compile(const XlaComputation& computation,
                                  CompileOptions options) {
   auto executable = PjRtStreamExecutorClient::Compile(computation, options);
 
-#if defined(GOOGLE_CUDA) || defined(TENSORFLOW_USE_ROCM)
-  metrics::RecordFreeGpuSystemMemory();
+#ifdef GOOGLE_CUDA || defined(TENSORFLOW_USE_ROCM)
+  for (const auto& device : addressable_devices()) {
+    metrics::RecordFreeGpuSystemMemory(device->local_hardware_id());
+  }
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
+
   return executable;
 }
 
