@@ -106,6 +106,8 @@ def make_gpu_client(
   if memory_fraction:
     config.memory_fraction = float(memory_fraction)
   config.preallocate = preallocate not in ('0', 'false', 'False')
+  if 'collective_memory_size' in options:
+    config.collective_memory_size = options['collective_memory_size']
   register_custom_call_handler('CUDA', _xla.register_custom_call_target)
   register_custom_call_handler('ROCM', _xla.register_custom_call_target)
 

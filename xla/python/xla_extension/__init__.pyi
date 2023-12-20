@@ -451,6 +451,7 @@ class GpuAllocatorConfig:
       kind: Kind = ...,
       memory_fraction: float = ...,
       preallocate: bool = ...,
+      collective_memory_size: int = ...,
   ) -> None: ...
 
 class HostBufferSemantics(enum.IntEnum):
