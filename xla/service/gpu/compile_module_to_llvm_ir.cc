@@ -298,6 +298,34 @@ StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
   results.llvm_module->setTargetTriple(target_triple);
   results.llvm_module->setDataLayout(data_layout);
 
+  // Set memory space to 1 (collective memory using ncclMemAlloc) for
+  // all-reduce, all-gather, and reduce-scatter inputs/outputs.
+  auto colorer = [](HloAliasAnalysis* alias_analysis, const HloOrdering&) {
+    for (HloValue* value : alias_analysis->dataflow_analysis().values()) {
+      auto& buffer = alias_analysis->GetBufferContainingValue(*value);
+      for (const auto& alias : buffer.values()) {
+        if (alias->instruction()->opcode() == HloOpcode::kAllReduce ||
+            alias->instruction()->opcode() == HloOpcode::kAllReduceStart ||
+            alias->instruction()->opcode() == HloOpcode::kAllReduceDone ||
+            alias->instruction()->opcode() == HloOpcode::kAllGather ||
+            alias->instruction()->opcode() == HloOpcode::kAllGatherStart ||
+            alias->instruction()->opcode() == HloOpcode::kAllGatherDone ||
+            alias->instruction()->opcode() == HloOpcode::kReduceScatter) {
+          value->set_color(1);
+        } else if ((alias->instruction()->opcode() == HloOpcode::kAsyncStart ||
+                    alias->instruction()->opcode() == HloOpcode::kAsyncDone) &&
+                   alias->instruction()->async_wrapped_opcode() ==
+                       HloOpcode::kReduceScatter) {
+          value->set_color(1);
+        }
+      }
+      if (!value->has_color()) {
+        value->set_color(0);
+      }
+    }
+    return OkStatus();
+  };
+
   TF_ASSIGN_OR_RETURN(
       results.buffer_assignment,
       BufferAssigner::Run(
@@ -307,7 +335,12 @@ StatusOr<CompileModuleResults> CompileModuleToLlvmIr(
           /*color_alignment=*/
           [](LogicalBuffer::Color) { return kXlaAllocatedBufferAlignBytes; },
           /*allocate_buffers_for_constants=*/true,
-          /*colorer=*/BufferAssigner::DefaultColorer(),
+          /*colorer=*/
+          hlo_module->config()
+                  .debug_options()
+                  .xla_gpu_enable_nccl_user_buffers()
+              ? colorer
+              : BufferAssigner::DefaultColorer(),
           /*must_not_live_out=*/{}, can_share_buffer_function));
 
   VLOG(1) << "Buffer Assignment Stats for " << hlo_module->name() << "\n"

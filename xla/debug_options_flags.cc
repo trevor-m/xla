@@ -139,6 +139,7 @@ DebugOptions DefaultDebugOptionsIgnoringFlags() {
   opts.set_xla_gpu_enable_custom_fusions(false);
   opts.set_xla_gpu_nccl_termination_timeout_seconds(-1);
   opts.set_xla_gpu_enable_shared_constants(true);
+  opts.set_xla_gpu_enable_nccl_user_buffers(true);
 
   // XLA:GPU + IREE runtime flags.
   opts.set_xla_gpu_enable_gpu2_runtime(false);
@@ -1099,6 +1100,11 @@ void MakeDebugOptionsFlags(std::vector<tsl::Flag>* flag_list,
       bool_setter_for(&DebugOptions::set_xla_gpu_enable_shared_constants),
       debug_options->xla_gpu_enable_shared_constants(),
       "Enable constant sharing between GPU executables"));
+  flag_list->push_back(tsl::Flag(
+      "xla_gpu_enable_nccl_user_buffers",
+      bool_setter_for(&DebugOptions::set_xla_gpu_enable_nccl_user_buffers),
+      debug_options->xla_gpu_enable_nccl_user_buffers(),
+      "Enables NCCL user buffer registration"));
   flag_list->push_back(tsl::Flag(
       "xla_gpu_redzone_scratch_max_megabytes",
       int64_setter_for(

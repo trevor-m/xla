@@ -224,6 +224,49 @@ StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
   return device_buffers;
 }
 
+Status MaybeRegisterBuffers(int device_ordinal,
+                            const std::vector<DeviceBufferPair>& buffers,
+                            ncclComm_t comm) {
+  // TODO(tmorris): Only register if xla_gpu_enable_nccl_user_buffers is true.
+#if XLA_ENABLE_XCCL
+  // Keep track of which communicators we have registered for already.
+  // Each device has one NCCL buffer which only needs to be registered once per
+  // each comm.
+  struct RegisteredBuffers {
+    absl::Mutex mu;
+    absl::flat_hash_map<int, absl::flat_hash_set<ncclComm_t>> per_device_comms
+        ABSL_GUARDED_BY(mu);
+    // Buffers could be deregistered with ncclCommDeregister.
+    std::vector<void*> handles ABSL_GUARDED_BY(mu);
+  };
+  static auto& all_registered = *new RegisteredBuffers;
+
+  auto maybe_register = [&](const se::DeviceMemoryBase& buffer) {
+    if (!all_registered.per_device_comms[device_ordinal].contains(comm)) {
+      void* handle;
+      VLOG(1) << "ncclCommRegister comm=" << comm << " buff=" << buffer.opaque()
+              << " size=" << buffer.size();
+      XLA_CUDA_RETURN_IF_ERROR(ncclCommRegister(
+          comm, const_cast<void*>(buffer.opaque()), buffer.size(), &handle));
+      all_registered.per_device_comms[device_ordinal].insert(comm);
+      all_registered.handles.push_back(handle);
+    }
+    return OkStatus();
+  };
+
+  absl::MutexLock lock(&all_registered.mu);
+  for (int i = 0; i < buffers.size(); ++i) {
+    TF_RETURN_IF_ERROR(maybe_register(buffers[i].source_buffer));
+    TF_RETURN_IF_ERROR(maybe_register(buffers[i].destination_buffer));
+  }
+  return OkStatus();
+#else  // XLA_ENABLE_XCCL
+  return Unimplemented(
+      "NCCL support is not available: this binary was not built with a CUDA "
+      "compiler, which is necessary to build the NCCL source library.");
+#endif  // XLA_ENABLE_XCCL
+}
+
 Status NcclCollectiveThunk::ExecuteOnStream(const ExecuteParams& params) {
 #if XLA_ENABLE_XCCL
   VLOG(1) << absl::StreamFormat("Starting %s %s.", IsAsync() ? "async" : "sync",
