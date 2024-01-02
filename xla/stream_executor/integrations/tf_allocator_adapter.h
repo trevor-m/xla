@@ -131,6 +131,7 @@ class MultiDeviceAdapter : public DeviceMemoryAllocator {
   }
 
   tsl::Status Deallocate(int device_ordinal, DeviceMemoryBase mem) override {
+    if (mem.opaque() == nullptr) return tsl::OkStatus();
     // Memory space is not passed to deallocate, look up in
     // buffer_memory_spaces_.
     int64_t memory_space;
