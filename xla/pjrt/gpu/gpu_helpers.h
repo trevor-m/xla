@@ -62,7 +62,7 @@ struct GpuAllocatorConfig {
   // using `xla_gpu_enable_nccl_user_buffers=true`. If this value is 0,
   // collective memory will not be allocated. Should be set to a multiple of
   // 512MB to avoid wasting memory due to granularity requirements.
-  size_t collective_memory_size = 0;
+  size_t collective_memory_size = 4 * (1LL << 30);
 };
 
 std::unique_ptr<tsl::BFCAllocator> GetGpuHostAllocator(
