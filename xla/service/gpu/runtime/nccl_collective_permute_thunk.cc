@@ -109,6 +109,12 @@ NcclCollectivePermuteStartThunk::NcclCollectivePermuteStartThunk(
     replica_group.add_replica_ids(i);
   }
 
+  auto status_or_participants = GetParticipatingDevices(/*global_device_id=*/0, *params.device_assn, config.replica_groups, config.group_mode);
+  TF_CHECK_OK(status_or_participants.status());
+  auto participants = *status_or_participants;
+  VLOG(1) << "@@@GetNcclP2PConfig num_participants: " << num_participants;
+  VLOG(1) << "@@@GetNcclP2PConfig GetParticipatingDevices.size(): " << participants.size();
+
   const std::vector<std::pair<int64_t, int64_t>>& source_target_pairs =
       instr->source_target_pairs();
 

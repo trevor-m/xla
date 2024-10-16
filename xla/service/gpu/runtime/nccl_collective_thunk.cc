@@ -242,6 +242,21 @@ absl::StatusOr<NcclCliqueKey> GetNcclCliqueKey(
                             *params.device_assn, replica_groups, group_mode));
   }
 
+  bool order_agnostic = is_all_reduce || is_collective_permute;
+  if (order_agnostic) {
+    // For collective permute, preserve device mapping.
+    if (send_Recv_pairs) {
+      for (auto pair : send_recv_pairs) {
+        if (pair.sendid) pair.sendid = participants.find(pair.sendid);
+        if (pair.recvid) pair.recvid = participants.find(pair.recvid);
+      }
+    }
+    absl::c_sort(participants);
+    for (size_t i = 0; i < participant_groups.size(); ++i) {
+      absl::c_sort(participant_groups[i]);
+    }
+  }
+
   if (IsGlobalNcclConfig() &&
       (participants.size() != params.device_assn->replica_count())) {
     return InvalidArgument(

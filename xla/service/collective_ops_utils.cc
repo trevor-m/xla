@@ -385,7 +385,7 @@ absl::StatusOr<std::vector<GlobalDeviceId>> GetParticipatingDevices(
     CollectiveOpGroupMode group_mode) {
   int replica_count = device_assignment.replica_count();
   int partition_count = device_assignment.computation_count();
-
+  VLOG(1) << "@@@replica_count: " << replica_count << " partition_count:" << partition_count;
   TF_ASSIGN_OR_RETURN(const DeviceAssignment::LogicalID logical_id,
                       device_assignment.LogicalIdForDevice(device_id));
   int current_replica_id = logical_id.replica_id;
