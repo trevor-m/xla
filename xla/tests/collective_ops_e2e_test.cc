@@ -51,6 +51,7 @@ namespace {
 
 namespace op = ::xla::testing::opcode_matchers;
 using ::testing::NotNull;
+using ::testing::SizeIs;
 
 // Makes a DeviceAssignment device#i to replica_id #i.
 DeviceAssignment MakeDeviceAssn(int64_t num_replicas) {
@@ -1613,6 +1614,102 @@ ENTRY entry {
   ASSERT_EQ(results.size(), kNumReplicas);
   LiteralTestUtil::ExpectR1Equal<float>({1., 3., 4., 0}, results[0]);
   LiteralTestUtil::ExpectR1Equal<float>({2., 5., 0., 0.}, results[1]);
+}
+
+TEST_F(CollectiveOpsTestE2E, AllReduceUserBuffers) {
+  if (!IsCuda()()) {
+    GTEST_SKIP() << "Test requires cuda.";
+  }
+  const absl::string_view kModuleStr = R"(
+      HloModule test
+
+      apply_op {
+        x = u32[] parameter(0)
+        y = u32[] parameter(1)
+        ROOT apply_op = u32[] add(x, y)
+      }
+
+      ENTRY test_computation {
+        id = u32[] replica-id()
+        ROOT all-reduce = u32[] all-reduce(id), to_apply=apply_op
+      }
+    )";
+  const int64_t kNumReplicas = 2;
+
+  DebugOptions debug_options = GetDebugOptionsForTest();
+  debug_options.set_xla_gpu_enable_nccl_user_buffers(true);
+  HloModuleConfig config =
+      GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
+  config.set_debug_options(debug_options);
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kModuleStr, config));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto executable,
+      CreateExecutable(std::move(module), /*run_hlo_passes=*/true));
+  ASSERT_TRUE(executable->has_module());
+
+  // Verify that the collective memory space is used.
+  HloInstruction* all_reduce_start =
+      FindInstruction(&executable->module(), HloOpcode::kAllReduceStart);
+  EXPECT_THAT(all_reduce_start, NotNull());
+  EXPECT_EQ(all_reduce_start->shape().layout().memory_space(), 1);
+  ASSERT_THAT(all_reduce_start->operands(), SizeIs(1));
+  const HloInstruction* input = all_reduce_start->operand(0);
+  EXPECT_EQ(input->shape().layout().memory_space(), 1);
+
+  TF_ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
+                          ExecuteReplicated(executable.get(), kNumReplicas));
+  ASSERT_EQ(results.size(), kNumReplicas);
+  LiteralTestUtil::ExpectR1Equal<uint32_t>({10, 15, 11, 16}, results[0]);
+  LiteralTestUtil::ExpectR1Equal<uint32_t>({20, 25, 21, 26}, results[1]);
+}
+
+TEST_F(CollectiveOpsTestE2E, AllGatherUserBuffers) {
+  if (!IsCuda()()) {
+    GTEST_SKIP() << "Test requires cuda.";
+  }
+  const absl::string_view kModuleStr = R"(
+  HloModule test
+  ENTRY test_computation {
+    id = u32[] replica-id()
+    id2 = u32[1, 2] broadcast(id), dimensions={}
+    a0 = u32[1, 2] constant({{10, 15}})
+    a1 = u32[1, 2] add(id2, a0)
+    allgather = u32[2, 2] all-gather(a1), dimensions={0}
+    ROOT out = u32[4] reshape(allgather)
+  }
+  )";
+  const int64_t kNumReplicas = 2;
+
+  DebugOptions debug_options = GetDebugOptionsForTest();
+  debug_options.set_xla_gpu_enable_nccl_user_buffers(true);
+  HloModuleConfig config =
+      GetModuleConfigForTest(/*replica_count=*/kNumReplicas);
+  config.set_debug_options(debug_options);
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnVerifiedModule(kModuleStr, config));
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto executable,
+      CreateExecutable(std::move(module), /*run_hlo_passes=*/true));
+  ASSERT_TRUE(executable->has_module());
+
+  // Verify that the collective memory space is used.
+  HloInstruction* all_gather_start =
+      FindInstruction(&executable->module(), HloOpcode::kAllGatherStart);
+  EXPECT_THAT(all_gather_start, NotNull());
+  EXPECT_EQ(all_gather_start->shape().layout().memory_space(), 1);
+  ASSERT_THAT(all_gather_start->operands(), SizeIs(1));
+  const HloInstruction* input = all_gather_start->operand(0);
+  EXPECT_EQ(input->shape().layout().memory_space(), 1);
+
+  TF_ASSERT_OK_AND_ASSIGN(std::vector<Literal> results,
+                          ExecuteReplicated(executable.get(), kNumReplicas));
+  ASSERT_EQ(results.size(), kNumReplicas);
+  for (const Literal& result : results) {
+    LiteralTestUtil::ExpectR1Equal<uint32_t>({10, 15, 11, 16}, result);
+  }
 }
 
 }  // namespace
