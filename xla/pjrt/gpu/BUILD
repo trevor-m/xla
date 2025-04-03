@@ -69,6 +69,7 @@ cc_library(
         "//xla:xla_proto_cc",
         "//xla/client:client_library",
         "//xla/client:local_client",
+        "//xla/core/collectives:collectives_registry",
         "//xla/hlo/builder:xla_computation",
         "//xla/pjrt:compile_options_proto_cc",
         "//xla/pjrt:event_pool",
@@ -146,7 +147,6 @@ cc_library(
         # keep sorted
         ":nccl_id_store",
         "//xla:debug_options_flags",
-        "//xla/backends/gpu/collectives:nvshmem_collectives",
         "//xla/service/gpu:gpu_compiler",
         "//xla/service/gpu:gpu_constants",
         "//xla/service/gpu:gpu_executable",
@@ -173,9 +173,6 @@ xla_cc_test(
         "nomsan",
         "requires-gpu-nvidia:2",
     ],
-    env = {
-        "XLA_FLAGS": "--xla_flags_reset=true",
-    },
     deps = [
         ":gpu_topology",
         ":gpu_topology_proto_cc",
@@ -235,6 +232,44 @@ xla_cc_test(
         "@tsl//tsl/platform:status",
         "@tsl//tsl/platform:status_matchers",
         "@tsl//tsl/platform:statusor",
+    ],
+)
+
+xla_cc_test(
+    name = "se_gpu_pjrt_client_nvshmem_test",
+    srcs = ["se_gpu_pjrt_client_nvshmem_test.cc"],
+    tags = [
+        "gpu",
+        "no_oss",
+        "noasan",
+        "nomsan",
+        "requires-gpu-nvidia:2",
+    ],
+    env = {
+        "XLA_FLAGS": "--xla_gpu_experimental_enable_nvshmem=true",
+    },
+    deps = [
+        ":se_gpu_pjrt_client",
+        "//xla:debug_options_flags",
+        "//xla:status_macros",
+        "//xla/hlo/utils:hlo_query",
+        "//xla/pjrt/distributed",
+        "//xla/pjrt/distributed:client",
+        "//xla/pjrt/distributed:service",
+        "//xla/pjrt/gpu:se_gpu_pjrt_client",
+        "//xla/pjrt/gpu:se_gpu_pjrt_compiler",
+        "//xla/tests:literal_test_util",
+        "//xla/tsl/platform:errors",
+        "//xla/tsl/platform:status",
+        "//xla/tsl/platform:statusor",
+        "//xla/tsl/platform:subprocess",
+        "//xla/tsl/util:command_line_flags",
+        "@com_google_absl//absl/log",
+        "@com_google_absl//absl/status",
+        "@com_google_absl//absl/strings:str_format",
+        "@com_google_absl//absl/time",
+        "@com_google_googletest//:gtest",
+        "@local_config_cuda//cuda:cuda_headers",
     ],
 )
 
