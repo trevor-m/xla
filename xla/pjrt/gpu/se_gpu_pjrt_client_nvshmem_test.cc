@@ -24,13 +24,18 @@ limitations under the License.
 #include "absl/status/status.h"
 #include "absl/strings/str_format.h"
 #include "absl/time/time.h"
-#include "third_party/gpus/cuda/include/cuda_runtime_api.h"
+
+#include "xla/pjrt/distributed/in_memory_key_value_store.h"
+#include "xla/service/platform_util.h"
+#include "xla/ffi/ffi.h"
+#include "xla/ffi/ffi_api.h"
 #include "xla/debug_options_flags.h"
 #include "xla/hlo/utils/hlo_query.h"
 #include "xla/pjrt/distributed/client.h"
 #include "xla/pjrt/distributed/distributed.h"
 #include "xla/pjrt/distributed/service.h"
 #include "xla/status_macros.h"
+#include "xla/tsl/lib/core/status_test_util.h"
 #include "xla/tests/literal_test_util.h"
 #include "xla/tsl/platform/errors.h"
 #include "xla/tsl/platform/status.h"
@@ -223,7 +228,7 @@ absl::Status UserBufferWithNvshmemMallocTestBody(const int node_id,
                       ParseAndReturnUnverifiedModule(kModuleStr, {}));
   xla::XlaComputation xla_computation(hlo_module->ToProto());
   TF_ASSIGN_OR_RETURN(std::unique_ptr<xla::PjRtLoadedExecutable> executable,
-                      client->Compile(xla_computation, options));
+                      client->CompileAndLoad(xla_computation, options));
 
   // Verify that the collective memory space is used.
   TF_ASSIGN_OR_RETURN(auto modules, executable->GetHloModules());

@@ -82,7 +82,7 @@ class Collectives {
                      absl::Span<const RankId> keys, const Config& config) = 0;
   
   // Set global initialization information used by NVSHMEM
-  virtual SetEnvInfo(int process_id, size_t num_processes,
+  virtual void SetEnvInfo(int process_id, size_t num_processes,
                      size_t device_count_per_process,
                      std::weak_ptr<KeyValueStoreInterface> kv_store) {}
 };

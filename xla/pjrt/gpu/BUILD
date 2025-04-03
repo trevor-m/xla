@@ -250,14 +250,17 @@ xla_cc_test(
     },
     deps = [
         ":se_gpu_pjrt_client",
+	":se_gpu_pjrt_compiler",
         "//xla:debug_options_flags",
         "//xla:status_macros",
+        "//xla/ffi",
+        "//xla/ffi:ffi_api",
+        "//xla/tsl/lib/core:status_test_util",
         "//xla/hlo/utils:hlo_query",
         "//xla/pjrt/distributed",
         "//xla/pjrt/distributed:client",
+        "//xla/pjrt/distributed:in_memory_key_value_store",
         "//xla/pjrt/distributed:service",
-        "//xla/pjrt/gpu:se_gpu_pjrt_client",
-        "//xla/pjrt/gpu:se_gpu_pjrt_compiler",
         "//xla/tests:literal_test_util",
         "//xla/tsl/platform:errors",
         "//xla/tsl/platform:status",
@@ -269,7 +272,9 @@ xla_cc_test(
         "@com_google_absl//absl/strings:str_format",
         "@com_google_absl//absl/time",
         "@com_google_googletest//:gtest",
-        "@local_config_cuda//cuda:cuda_headers",
+	"@tsl//tsl/platform:status_matchers",
+
+        "//xla/stream_executor/cuda:cuda_platform",
     ],
 )
 
